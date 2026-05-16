@@ -9,6 +9,7 @@ from collections import Counter
 import numpy as np
 
 from embcache import CacheConfig, EmbeddingCache, EmbeddingResult, MetricsCollector
+from embcache._keys import make_embedding_cache_key
 from benchmarks._utils import (
     append_to_md,
     ensure_benchmark_md_sections,
@@ -65,6 +66,14 @@ async def main():
     for q in top_100:
         await cache.get_or_fetch(q, fetch_fn)
 
+    # After pre-warm loop
+    bulk_items = [
+        (make_embedding_cache_key(config.embedding_fingerprint, q), query_to_vector[q])
+        for q in top_100
+    ]
+    await cache._faiss.add_bulk(bulk_items)
+    print(f"FAISS bulk loaded {len(bulk_items)} vectors")
+
     exact_hits = 0
     cpu_l2_hits = 0
     semantic_hits = 0
@@ -81,7 +90,7 @@ async def main():
 
     for i, q in enumerate(sampled):
         query = q
-        if (i + 1) % 10 == 0:
+        if (i + 1) % 5 == 0:
             query = f"{q} the"
             semantic_attempts += 1
 

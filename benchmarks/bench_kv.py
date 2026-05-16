@@ -58,10 +58,10 @@ async def run_kv_scenario(name, size_bytes, n_bench, simulated_latency_ms):
 
 
 async def run_gpu_kv_scenario(name, size_bytes, n_bench):
-    from embcache._config import detect_hardware
+    import torch
     from embcache._gpu_cache import GPUCache
     
-    if detect_hardware() != "gpu_a100":
+    if not torch.cuda.is_available() or "A100" not in torch.cuda.get_device_name(0):
         return None
         
     metrics = MetricsCollector(namespace=f"{name}_gpu")
@@ -93,10 +93,10 @@ async def run_gpu_kv_scenario(name, size_bytes, n_bench):
 
 
 async def run_gpu_kv_hit_scenario_d():
-    from embcache._config import detect_hardware
+    import torch
     from embcache._gpu_cache import GPUCache
 
-    if detect_hardware() != "gpu_a100":
+    if not torch.cuda.is_available() or "A100" not in torch.cuda.get_device_name(0):
         return {"skipped": True, "results": {}}
 
     kv_sizes = {"kv_small": 50 * 1024, "kv_medium": 300 * 1024, "kv_large": 600 * 1024}

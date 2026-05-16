@@ -231,19 +231,70 @@ async def main():
     args = parser.parse_args()
 
     metrics = MetricsCollector(namespace="bench_gpu")
-    gpu = GPUCache(
-        embedding_dim=EMBED_DIM,
-        kv_slot_size=KV_SLOT_SIZE,
-        gpu_cache_max_fraction=GPU_FRACTION,
-        embedding_fraction=0.5,
-        metrics=metrics,
-    )
+    try:
+        gpu = GPUCache(
+            embedding_dim=EMBED_DIM,
+            kv_slot_size=KV_SLOT_SIZE,
+            gpu_cache_max_fraction=GPU_FRACTION,
+            embedding_fraction=0.5,
+            metrics=metrics,
+        )
+        print(f"GPUCache instantiated: {gpu.stats()}")
+    except Exception as e:
+        print(f"FATAL: GPUCache init failed: {e}")
+        import traceback; traceback.print_exc()
+        sys.exit(1)
 
-    write_row = run_write_throughput(gpu)
-    read_row = run_read_throughput(gpu)
-    h2d_rows = run_h2d_by_dim(metrics)
-    eviction_row = run_eviction_with_demotion(gpu, metrics)
-    kv_rows = run_kv_round_trip(gpu)
+    print("Scenario 1: START (Write Throughput)")
+    try:
+        write_row = run_write_throughput(gpu)
+        print("Scenario 1: DONE")
+    except Exception as e:
+        print(f"ERROR in Scenario 1: {e}")
+        import traceback; traceback.print_exc()
+        write_row = {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "qps": 0}
+
+    print("Scenario 2: START (Read Throughput)")
+    try:
+        read_row = run_read_throughput(gpu)
+        print("Scenario 2: DONE")
+    except Exception as e:
+        print(f"ERROR in Scenario 2: {e}")
+        import traceback; traceback.print_exc()
+        read_row = {"p50_ms": 0, "p95_ms": 0, "p99_ms": 0, "qps": 0}
+
+    print("Scenario 3: START (H2D by Dim)")
+    try:
+        h2d_rows = run_h2d_by_dim(metrics)
+        print("Scenario 3: DONE")
+    except Exception as e:
+        print(f"ERROR in Scenario 3: {e}")
+        import traceback; traceback.print_exc()
+        h2d_rows = []
+
+    print("Scenario 4: START (Eviction)")
+    try:
+        eviction_row = run_eviction_with_demotion(gpu, metrics)
+        print("Scenario 4: DONE")
+    except Exception as e:
+        print(f"ERROR in Scenario 4: {e}")
+        import traceback; traceback.print_exc()
+        eviction_row = {
+            "eviction_p50_ms": 0.0,
+            "eviction_p95_ms": 0.0,
+            "total_evictions": 0,
+            "verified_demotions": 0,
+            "demotion_success_rate": 0.0,
+        }
+
+    print("Scenario 5: START (KV Round Trip)")
+    try:
+        kv_rows = run_kv_round_trip(gpu)
+        print("Scenario 5: DONE")
+    except Exception as e:
+        print(f"ERROR in Scenario 5: {e}")
+        import traceback; traceback.print_exc()
+        kv_rows = []
 
     output = {
         "scenario_1_write": write_row,
