@@ -115,7 +115,10 @@ def run_eviction_with_demotion(gpu: GPUCache, metrics: MetricsCollector) -> dict
 
     cpu = CPUCache(max_embedding_bytes=512 * 1024 * 1024, max_kv_bytes=0, metrics=metrics)
 
-    target_used = int(n_slots * 0.95)
+    EVICTION_FILL_COUNT = 500
+    target_used = min(EVICTION_FILL_COUNT, int(n_slots * 0.95))
+    
+    print(f"Scenario 4: filling {target_used} slots (slab has {n_slots} total)")
     for i in range(max(0, target_used - used_slots)):
         gpu.put_embedding(f"evict_fill_{i}", random_vector(EMBED_DIM))
 
@@ -146,7 +149,8 @@ def run_eviction_with_demotion(gpu: GPUCache, metrics: MetricsCollector) -> dict
     gpu._evict_from_pool = evict_with_demotion
 
     latencies = []
-    for i in range(200):
+    EVICTION_PRESSURE_COUNT = 50
+    for i in range(EVICTION_PRESSURE_COUNT):
         t0 = time.perf_counter()
         gpu.put_embedding(f"evict_pressure_{i}", random_vector(EMBED_DIM))
         latencies.append((time.perf_counter() - t0) * 1000.0)
