@@ -1,6 +1,6 @@
 # embcache
 
-High-performance multi-tier embedding and KV-state cache for LLM orchestration. Provides low-latency retrieval across CPU (L2), GPU (L1), and Cloud Storage tiers, with FAISS-based semantic similarity search and optional NVMe/GDS fast-recovery for KV state.
+High-performance two-tier embedding and KV-state cache for healthcare RAG pipelines. Sits between your RAG query pipeline and BigQuery/GCS. GPU-native on A100 (pre-allocated CUDA slab, shared LRU), CPU-native everywhere else. One public interface per cache type.
 
 ## Installation
 
@@ -8,7 +8,7 @@ High-performance multi-tier embedding and KV-state cache for LLM orchestration. 
 pip install embcache
 # GPU support (faiss-gpu + CUDA slabs)
 pip install embcache[gpu]
-# Benchmarks
+# Benchmarks and calibration
 pip install embcache[bench]
 ```
 
@@ -94,17 +94,17 @@ asyncio.run(main())
 | `llm` | `LLMConfig \| None` | `None` | Endpoint config for KV-state generation. |
 | `faiss` | `FAISSIndexConfig` | `hnsw` defaults | Semantic-tier index parameters. |
 | `gpu_cache_max_fraction` | `float` | `0.30` | Fraction of VRAM reserved for L1 slab (open interval `(0, 1)`). |
-| `max_faiss_write_queue` | `int` | `100` | Background FAISS write-queue depth. |
-| `context_window` | `int` | `0` | Number of trailing conversation-context strings folded into the embedding key. |
-| `gcs_bucket` | `str` | `""` | GCS bucket name (empty disables GCS). |
+| `max_faiss_write_queue` | `int` | `100` | Background FAISS write-queue depth. Drops writes at ceiling — expected under bulk load. |
+| `context_window` | `int` | `0` | Trailing conversation turns folded into embedding key. Benchmark hit rate before increasing. |
+| `gcs_bucket` | `str` | `""` | GCS bucket name. Empty string disables GCS cold store. |
 | `gcs_prefix` | `str` | `"embcache/"` | Object key prefix in GCS. |
 | `local_nvme_path` | `str` | `""` | NVMe base directory for GDS backend. |
-| `gds_enabled` | `bool` | `False` | Activate GDS backend (gated on benchmark improvement). |
-| `enable_prefetch` | `bool` | `False` | Enable co-occurrence prefetch engine. |
-| `semantic_similarity_threshold` | `float` | `0.90` | FAISS match cutoff (cosine ≥ thr, L2 ≤ 1−thr). |
+| `gds_enabled` | `bool` | `False` | Activate GDS backend. Gated — see GDS Gate below. |
+| `enable_prefetch` | `bool` | `False` | Enable co-occurrence prefetch engine. Off by default — see kill criteria. |
+| `semantic_similarity_threshold` | `float` | `0.90` | FAISS match cutoff (cosine ≥ threshold, L2 ≤ 1−threshold). |
 | `max_embedding_bytes` | `int` | `2 GiB` | CPU L2 budget for embeddings. |
-| `max_kv_bytes` | `int` | `8 GiB` | CPU L2 budget for KV state. |
-| `exact_index_max_entries` | `int` | `10000` | LRU size for the exact-key index. |
+| `max_kv_bytes` | `int` | `8 GiB` | CPU L2 budget for KV states. Tune against real document sizes before production. |
+| `exact_index_max_entries` | `int` | `10_000` | LRU capacity for the exact-key index. |
 
 ## Result Types
 
@@ -113,42 +113,92 @@ EmbeddingResult(key, embedding, hit, tier, latency_ms, consent_scope, metadata)
 KVResult(key, kv_state, hit, tier, latency_ms, consent_scope, metadata)
 ```
 
-Tiers: `"exact"`, `"gpu_l1"`, `"cpu_l2"`, `"semantic"`, `"cold"`, `"fetch"`. `hit` is `True` for every tier except `"fetch"` (which means the caller's `fetch_fn` / LLM generated a fresh value).
+`tier` values: `"exact"`, `"gpu_l1"`, `"cpu_l2"`, `"semantic"`, `"cold"`, `"fetch"`. `hit=True` for every tier except `"fetch"` (caller's `fetch_fn` or LLM generated a fresh value).
 
 ## Hardware Tiers
 
-Hardware detected at construction:
-- **CPU** (default): activates `CPUCache` (LRU) and `FAISSIndex` (CPU).
-- **GPU** (any CUDA device): activates `GPUCache` (preallocated slab) and routes FAISS to `StandardGpuResources` when available.
+Detected automatically at construction. Never configure manually.
 
-GDS NVMe path stays gated behind `gds_enabled=True` and `local_nvme_path` until the benchmark suite proves ≥30% latency improvement over GCS baseline.
+| Detected hardware | What activates |
+|---|---|
+| A100 + NVMe | GPU L1 slab (CUDA), CPU L2 (pinned), GDS NVMe (if `gds_enabled=True`), GCS cold store |
+| Any other CUDA GPU | CPU L2 (pinned), GCS cold store — GPU tier falls back silently |
+| CPU only | CPU L2 (numpy LRU), GCS cold store |
+
+FAISS index runs on GPU when CUDA is available, CPU otherwise. Never exposed to caller.
 
 ## Observability
 
+Start the Prometheus metrics endpoint before serving traffic:
+
 ```python
 from embcache import start_metrics_server
-start_metrics_server(port=9090)
+start_metrics_server(port=9090)   # scrape at /metrics
 ```
 
-Key Prometheus metrics (all labeled by `namespace`):
-- `embcache_exact_hits_total`, `embcache_gpu_l1_hits_total`, `embcache_cpu_l2_hits_total`, `embcache_semantic_hits_total`, `embcache_cold_store_hits_total`, `embcache_kv_hits_total`, `embcache_kv_misses_total`
-- `embcache_evictions_total{entry_type}`
-- `embcache_gcs_read_failures_total`, `embcache_gcs_write_failures_total`, `embcache_faiss_writes_dropped_total`
-- `embcache_slab_utilization_percent`, `embcache_slab_embedding_bytes`, `embcache_slab_kv_bytes`
-- `embcache_gpu_memory_reserved_bytes`, `embcache_gpu_memory_allocated_bytes`
-- `embcache_inflight_coalesced_requests`, `embcache_faiss_write_queue_depth`
-- Histograms: `embcache_kv_generation_latency_seconds`, `embcache_kv_state_size_bytes`, `embcache_gds_transfer_latency_seconds`, `embcache_h2d_transfer_latency_seconds`
+Key metrics (all labeled by `namespace`):
 
-## Feature Flags & Gates
+| Metric | Type | What it measures |
+|---|---|---|
+| `embcache_exact_hits_total` | Counter | Exact key matches |
+| `embcache_semantic_hits_total` | Counter | FAISS ANN matches above threshold |
+| `embcache_gpu_l1_hits_total` | Counter | GPU slab hits |
+| `embcache_cpu_l2_hits_total` | Counter | CPU LRU hits |
+| `embcache_cold_store_hits_total` | Counter | GCS / GDS hits |
+| `embcache_kv_hits_total` / `_misses_total` | Counter | KV state cache hits and misses |
+| `embcache_evictions_total{entry_type}` | Counter | LRU evictions by type (embedding / kv) |
+| `embcache_faiss_writes_dropped_total` | Counter | Writes dropped when queue full |
+| `embcache_gcs_write_failures_total` | Counter | GCS write errors |
+| `embcache_slab_utilization_percent` | Gauge | GPU slab fill fraction |
+| `embcache_slab_embedding_bytes` / `_kv_bytes` | Gauge | Slab usage by entry type |
+| `embcache_gpu_memory_reserved_bytes` | Gauge | torch.cuda.memory_reserved |
+| `embcache_inflight_coalesced_requests` | Gauge | In-flight deduplicated requests |
+| `embcache_faiss_write_queue_depth` | Gauge | Background FAISS queue depth |
+| `embcache_kv_generation_latency_seconds` | Histogram | LLM call latency (p50/p95/p99) |
+| `embcache_h2d_transfer_latency_seconds` | Histogram | Host-to-device transfer latency |
+| `embcache_gds_transfer_latency_seconds` | Histogram | NVMe read latency (GDS path) |
 
-- **Prefetch** (`enable_prefetch=True`): records co-occurrence and warms semantic neighbors into L1/L2 ahead of access.
-- **GDS Gate** (`gds_enabled=True` + `local_nvme_path`): bypasses GCS to NVMe; off until benchmarks show ≥30% latency improvement.
-- **Versioning**: any fingerprint change yields a different cache key — no silent stale hits.
+## Benchmarked performance (NVIDIA A100-SXM4-40GB, 83.5 GB RAM)
 
-## Limitations
+| Scenario | p50 latency | QPS |
+|---|---|---|
+| Embedding cache hit (exact) | 0.05 ms | 18,000+ |
+| Embedding cache hit (HNSW semantic) | 0.05 ms | 18,456 |
+| KV state cache hit (GPU L1, 40 KB) | 0.08 ms | — |
+| KV state cache hit (GPU L1, 480 KB) | 0.36 ms | — |
+| KV state cache hit (CPU L2, 480 KB) | 0.63 ms | — |
+| KV state generation (LLM miss) | ~200 ms | — |
+| Overall hit rate (Zipf α=1.2 workload) | — | 98.3% |
+| HNSW recall@1 | — | 1.00 |
 
-- **Concurrency**: FAISS writes use a single `asyncio.Lock`; not tuned for 10k+ concurrent writes/sec without batching.
-- **Persistence**: GCS is the durable tier; local FAISS index must be rebuilt or warmed (`EmbeddingCache.warm_from_gcs`) on restart.
-- **Schema**: KV states are opaque bytes — caller owns serialization.
-- **Memory**: GPU slab is statically allocated; resize requires process restart.
-- **Semantic lookup**: `get_or_fetch` performs FAISS search only when the caller passes an explicit `query_vector`. Without it the request falls through to cold storage / fetch_fn.
+Full results: [BENCHMARK_RESULTS.md](BENCHMARK_RESULTS.md)
+
+## Feature Flags and Kill Criteria
+
+**Prefetch** (`enable_prefetch=True`): records query co-occurrence, warms predicted neighbors into L1/L2 ahead of access. Disable permanently if pollution rate > 20% or hit rate < 30% after one week of real traffic.
+
+**GDS gate** (`gds_enabled=True` + `local_nvme_path`): bypasses GCS cold store with direct NVMe reads. Off by default. Enable only after running `python -m benchmarks.bench_gds` and confirming ≥ 30% latency improvement over GCS baseline. Document result in `BENCHMARK_RESULTS.md` before enabling.
+
+**Kill criteria** (monitor for first two weeks of production traffic):
+
+| Signal | Threshold | Action |
+|---|---|---|
+| Overall hit rate | < 20% | Abandon or radically simplify |
+| KV generation p95 | > 10s | Gate KVCache behind feature flag, default off |
+| Prefetch pollution rate | > 20% | Disable prefetch permanently |
+| Prefetch hit rate | < 30% | Disable prefetch permanently |
+| GPU vs CPU latency delta | < 15% and GDS gate failed | Revert to CPU-only |
+
+## Limitations (v1)
+
+- **Single event loop only.** Not thread-safe. Async-safe on one event loop per instance.
+- **Single CUDA stream per instance.** No multi-stream parallelism.
+- **No multi-process cache sharing.** GCS last-write-wins on concurrent writes from multiple processes.
+- **No multi-node distribution.** One machine, one cache instance.
+- **FAISS index rebuilt on restart.** Not persisted. Use `warm_from_gcs()` at startup to reload from GCS.
+- **GPU slab is statically allocated.** Resize requires process restart.
+- **KV states are opaque bytes.** Caller owns serialization and deserialization.
+- **Semantic lookup requires explicit query vector.** `get_or_fetch` falls through to cold store without one.
+- **IVF index requires explicit training.** Call `faiss_index.train(vectors)` with ≥ `ivf_nlist` vectors before serving if using `index_type="ivf"`.
+
+Parked for v2: Redis L0 tier, quantization, patient-level invalidation, FAISS persistence, multi-process sharing, multi-node distribution, true cuFile GDS kernel bypass.
