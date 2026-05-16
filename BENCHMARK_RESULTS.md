@@ -22,21 +22,25 @@ config = CacheConfig(
     gpu_cache_max_fraction=0.30,
 )
 ```
+
 ## Embedding Search Performance
 | Scenario | p50 (ms) | p95 (ms) | QPS | Recall@1 |
 |---|---|---|---|---|
-| cpu_flat | 0.05 | 0.05 | 18696.4 | N/A |
-| cpu_hnsw | 0.05 | 0.06 | 18435.0 | 1.00 |
-| gpu_flat | 0.05 | 0.06 | 18026.4 | N/A |
-| gpu_hnsw | 0.05 | 0.06 | 18256.2 | 1.00 |
+| cpu_flat | 0.05 | 0.06 | 18096.5 | N/A |
+| cpu_hnsw | 0.05 | 0.06 | 18138.2 | 1.00 |
+| gpu_flat | 0.05 | 0.06 | 18187.5 | N/A |
+| gpu_hnsw | 0.05 | 0.05 | 18456.1 | 1.00 |
+
 ## KV Cache Performance
 | Scenario | Size | Miss p50 | Hit p50 (CPU) | GPU Hit p50 ms | GPU Hit p95 ms | Rec. Slot Size |
 |---|---|---|---|---|---|---|
-| kv_small | 40 KB | 201.60 ms | 0.45 ms | 0.08 ms | 0.11 ms | 50 KB |
-| kv_medium | 240 KB | 201.78 ms | 0.55 ms | 0.20 ms | 0.22 ms | 300 KB |
-| kv_large | 480 KB | 201.64 ms | 0.61 ms | 0.31 ms | 0.34 ms | 600 KB |
+| kv_small | 40 KB | 201.58 ms | 0.45 ms | 0.08 ms | 0.11 ms | 50 KB |
+| kv_medium | 240 KB | 201.66 ms | 0.53 ms | 0.22 ms | 0.24 ms | 300 KB |
+| kv_large | 480 KB | 201.84 ms | 0.63 ms | 0.36 ms | 0.39 ms | 600 KB |
+
 ## GDS Gate
-Result: SKIPPED  no NVMe device detected
+Result: SKIPPED — no NVMe device detected
+Threshold: >= 30% latency improvement over GCS baseline required to enable GDSBackend.
 
 ## GPU Slab Performance
 | Scenario | p50 ms | p95 ms | p99 ms | QPS |
@@ -57,6 +61,7 @@ Result: SKIPPED  no NVMe device detected
 | KV 600KB get | 0.367 | 0.406 | - | - |
 | Eviction p50 | 0.594 | 1.033 | - | - |
 | Demotion rate | - | - | - | 100.0% |
+
 ## Hit Rate Validation
 | Metric | Value |
 |---|---|
