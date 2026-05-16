@@ -1,6 +1,7 @@
 import asyncio
-import numpy as np
 from typing import Tuple
+
+import numpy as np
 
 try:
     import faiss
@@ -11,6 +12,7 @@ from ._config import FAISSIndexConfig
 from ._metrics import MetricsCollector, get_logger
 
 _log = get_logger(__name__)
+
 
 class FAISSIndex:
     def __init__(
@@ -29,13 +31,12 @@ class FAISSIndex:
         self._max_queue = max_faiss_write_queue
 
         self._index = self._build_index()
-        self._trained = (config.index_type != "ivf")
+        self._trained = config.index_type != "ivf"
 
         self._key_to_id = {}
         self._id_to_key = {}
         self._next_id = 0
 
-        # Lazy: queue + writer created when an event loop is running.
         self._write_queue: asyncio.Queue | None = None
         self._write_lock: asyncio.Lock | None = None
         self._writer_task: asyncio.Task | None = None
@@ -54,9 +55,7 @@ class FAISSIndex:
             index = faiss.IndexIDMap(inner)
         elif self.config.index_type == "ivf":
             metric = faiss.METRIC_INNER_PRODUCT if self.config.metric == "cosine" else faiss.METRIC_L2
-            quantizer = (
-                faiss.IndexFlatIP(dim) if self.config.metric == "cosine" else faiss.IndexFlatL2(dim)
-            )
+            quantizer = faiss.IndexFlatIP(dim) if self.config.metric == "cosine" else faiss.IndexFlatL2(dim)
             ivf = faiss.IndexIVFFlat(quantizer, dim, self.config.ivf_nlist, metric)
             index = faiss.IndexIDMap(ivf)
         else:
@@ -64,6 +63,7 @@ class FAISSIndex:
 
         try:
             import torch
+
             if torch.cuda.is_available():
                 res = faiss.StandardGpuResources()
                 index = faiss.index_cpu_to_gpu(res, 0, index)
@@ -91,13 +91,11 @@ class FAISSIndex:
                 async with self._write_lock:
                     ids = np.array([self._next_id], dtype=np.int64)
                     vecs = vector.reshape(1, -1).astype(np.float32)
-
                     self._index.add_with_ids(vecs, ids)
 
                     self._key_to_id[key] = self._next_id
                     self._id_to_key[self._next_id] = key
                     self._next_id += 1
-
                     self.metrics.set_faiss_queue_depth(self._write_queue.qsize())
                 self._write_queue.task_done()
             except asyncio.CancelledError:
@@ -114,10 +112,7 @@ class FAISSIndex:
             if key in self._key_to_id:
                 return
 
-            vec = vector
-            if self.config.metric == "cosine":
-                vec = self._normalize(vec)
-
+            vec = self._normalize(vector) if self.config.metric == "cosine" else vector
             try:
                 self._write_queue.put_nowait((key, vec))
                 self.metrics.set_faiss_queue_depth(self._write_queue.qsize())
@@ -126,6 +121,29 @@ class FAISSIndex:
                 self.metrics.record_faiss_write_dropped()
         except Exception as e:
             _log.error(f"Error in FAISS add: {e}")
+
+    async def add_bulk(self, items: list[tuple[str, np.ndarray]]) -> int:
+        if self._write_lock is None:
+            self._write_lock = asyncio.Lock()
+        count = 0
+        try:
+            async with self._write_lock:
+                for key, vector in items:
+                    if key in self._key_to_id:
+                        continue
+
+                    vec = self._normalize(vector) if self.config.metric == "cosine" else vector
+                    idx = self._next_id
+                    self._index.add_with_ids(vec.reshape(1, -1).astype(np.float32), np.array([idx], dtype=np.int64))
+                    self._key_to_id[key] = idx
+                    self._id_to_key[idx] = key
+                    self._next_id += 1
+                    count += 1
+            _log.info(f"bulk added {count} vectors to FAISS index")
+            return count
+        except Exception as e:
+            _log.error(f"Error in FAISS add_bulk: {e}")
+            return count
 
     async def search(
         self, query_vector: np.ndarray, top_k: int = 1, threshold: float = 0.90
@@ -140,10 +158,10 @@ class FAISSIndex:
                 vec = self._normalize(vec.flatten()).reshape(1, -1)
 
             async with self._write_lock:
-                D, I = self._index.search(vec, top_k)
+                distances, indices = self._index.search(vec, top_k)
 
             results = []
-            for score, idx in zip(D[0], I[0]):
+            for score, idx in zip(distances[0], indices[0]):
                 if idx == -1:
                     continue
                 valid = score >= threshold if self.config.metric == "cosine" else score <= (1.0 - threshold)
@@ -194,12 +212,12 @@ class FAISSIndex:
         return self._index.ntotal
 
     def stats(self) -> dict:
-        s = {
+        data = {
             "index_type": self.config.index_type,
             "metric": self.config.metric,
             "total_vectors": self._index.ntotal,
             "queue_depth": self._write_queue.qsize() if self._write_queue else 0,
         }
         if self.config.index_type == "ivf":
-            s["trained"] = self._trained
-        return s
+            data["trained"] = self._trained
+        return data

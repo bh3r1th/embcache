@@ -2,10 +2,11 @@ import asyncio
 import time
 import argparse
 import json
+import numpy as np
 from unittest.mock import AsyncMock, MagicMock
 
 from embcache import KVCache, MetricsCollector
-from ._utils import percentile, append_to_md, make_kv_config
+from ._utils import percentile, append_to_md, ensure_benchmark_md_sections, make_kv_config
 
 
 async def run_kv_scenario(name, size_bytes, n_bench, simulated_latency_ms):
@@ -56,6 +57,81 @@ async def run_kv_scenario(name, size_bytes, n_bench, simulated_latency_ms):
     }
 
 
+async def run_gpu_kv_scenario(name, size_bytes, n_bench):
+    from embcache._config import detect_hardware
+    from embcache._gpu_cache import GPUCache
+    
+    if detect_hardware() != "gpu_a100":
+        return None
+        
+    metrics = MetricsCollector(namespace=f"{name}_gpu")
+    # Slot size is 1.25x headroom
+    gpu_cache = GPUCache(
+        embedding_dim=768, 
+        kv_slot_size=int(size_bytes * 1.25),
+        gpu_cache_max_fraction=0.1,
+        embedding_fraction=0.0,
+        metrics=metrics
+    )
+    
+    data = b"x" * size_bytes
+    # Pre-load 50
+    for i in range(50):
+        gpu_cache.put_kv(f"gpu_warm_{i}", data)
+        
+    latencies = []
+    for i in range(n_bench):
+        key = f"gpu_warm_{np.random.randint(0, 50)}"
+        start = time.perf_counter()
+        gpu_cache.get_kv(key)
+        latencies.append((time.perf_counter() - start) * 1000)
+        
+    return {
+        "p50": percentile(latencies, 50),
+        "p95": percentile(latencies, 95)
+    }
+
+
+async def run_gpu_kv_hit_scenario_d():
+    from embcache._config import detect_hardware
+    from embcache._gpu_cache import GPUCache
+
+    if detect_hardware() != "gpu_a100":
+        return {"skipped": True, "results": {}}
+
+    kv_sizes = {"kv_small": 50 * 1024, "kv_medium": 300 * 1024, "kv_large": 600 * 1024}
+    n_bench = 200
+    results = {}
+
+    for name, size in kv_sizes.items():
+        metrics = MetricsCollector(namespace=f"{name}_gpu_hit_d")
+        gpu_cache = GPUCache(
+            embedding_dim=768,
+            kv_slot_size=int(size * 1.25),
+            gpu_cache_max_fraction=0.1,
+            embedding_fraction=0.0,
+            metrics=metrics,
+        )
+
+        payload = b"x" * size
+        keys = [f"{name}_gpu_warm_{i}" for i in range(50)]
+        for key in keys:
+            gpu_cache.put_kv(key, payload)
+
+        latencies = []
+        for _ in range(n_bench):
+            key = keys[np.random.randint(0, len(keys))]
+            start = time.perf_counter()
+            gpu_cache.get_kv(key)
+            latencies.append((time.perf_counter() - start) * 1000)
+
+        results[name] = {
+            "p50": percentile(latencies, 50),
+            "p95": percentile(latencies, 95),
+        }
+
+    return {"skipped": False, "results": results}
+
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--n-bench", type=int, default=100)
@@ -70,24 +146,38 @@ async def main():
     ]
 
     all_results = []
+    gpu_results = {}
     for name, size in scenarios:
         print(f"Running scenario: {name} ({size // 1024} KB)")
         res = await run_kv_scenario(name, size, args.n_bench, args.simulated_latency_ms)
         all_results.append(res)
+        
+        gpu_res = await run_gpu_kv_scenario(name, size, args.n_bench)
+        if gpu_res:
+            gpu_results[name] = gpu_res
+
+    scenario_d = await run_gpu_kv_hit_scenario_d()
+    if not scenario_d["skipped"]:
+        for name, vals in scenario_d["results"].items():
+            gpu_results[name] = vals
 
     print(json.dumps(all_results, indent=2))
 
     md_content = (
-        "\n| Scenario | Size | Miss p50 | Hit p50 (CPU) | Rec. Slot Size |\n"
-        "|---|---|---|---|---|\n"
+        "\n| Scenario | Size | Miss p50 | Hit p50 (CPU) | GPU Hit p50 ms | GPU Hit p95 ms | Rec. Slot Size |\n"
+        "|---|---|---|---|---|---|---|\n"
     )
     for r in all_results:
+        gpu_p50 = f"{gpu_results[r['scenario']]['p50']:.2f} ms" if r['scenario'] in gpu_results else "N/A"
+        gpu_p95 = f"{gpu_results[r['scenario']]['p95']:.2f} ms" if r['scenario'] in gpu_results else "N/A"
         md_content += (
             f"| {r['scenario']} | {r['kv_state_bytes'] // 1024} KB | "
             f"{r['cache_miss_p50_ms']:.2f} ms | {r['cache_hit_cpu_p50_ms']:.2f} ms | "
+            f"{gpu_p50} | {gpu_p95} | "
             f"{r['recommended_kv_slot_size_bytes'] // 1024} KB |\n"
         )
 
+    ensure_benchmark_md_sections(args.output_md)
     append_to_md(args.output_md, "## KV Cache Performance", md_content)
 
 

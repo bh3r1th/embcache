@@ -7,7 +7,7 @@ from pathlib import Path
 from embcache import MetricsCollector
 from embcache._gcs_backend import GCSBackend
 from embcache._gds_backend import GDSBackend
-from ._utils import percentile, append_to_md, random_vector
+from ._utils import percentile, append_to_md, ensure_benchmark_md_sections, random_vector
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -88,6 +88,7 @@ GDS p50: {gds_p50:.2f} ms
 Improvement: {improvement:.1%}
 Threshold: >= 30% latency improvement required.
 """
+    ensure_benchmark_md_sections(args.output_md)
     append_to_md(args.output_md, "## GDS Gate", output)
     print(output)
 

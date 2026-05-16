@@ -6,7 +6,7 @@ import time
 import numpy as np
 import os
 from pathlib import Path
-from ._utils import append_to_md
+from ._utils import append_to_md, ensure_benchmark_md_sections
 
 try:
     import torch
@@ -104,6 +104,7 @@ config = CacheConfig(
 {snippet.strip()}
 ```
 """
+    ensure_benchmark_md_sections(args.output_md)
     append_to_md(args.output_md, "## Calibration Recommendations", md_content)
 
 if __name__ == "__main__":

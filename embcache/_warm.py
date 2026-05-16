@@ -1,16 +1,17 @@
 import asyncio
-from typing import Optional, Any
+from typing import Any, Optional
 
-from ._gcs_backend import GCSBackend
+from ._cpu_cache import CPUCache
 from ._exact_index import ExactIndex
 from ._faiss_index import FAISSIndex
-from ._cpu_cache import CPUCache
+from ._gcs_backend import GCSBackend
 from ._metrics import get_logger
 
 _log = get_logger(__name__)
 
 EMBEDDING_WARM_BATCH = 50
 KV_WARM_BATCH = 10
+
 
 class WarmupLoader:
     def __init__(
@@ -41,10 +42,9 @@ class WarmupLoader:
 
         for i in range(0, len(target_keys), EMBEDDING_WARM_BATCH):
             batch = target_keys[i : i + EMBEDDING_WARM_BATCH]
-            results = await asyncio.gather(
-                *(self._gcs.get_embedding(k) for k in batch), return_exceptions=True
-            )
+            results = await asyncio.gather(*(self._gcs.get_embedding(k) for k in batch), return_exceptions=True)
 
+            batch_pairs: list[tuple[str, Any]] = []
             for key, vector in zip(batch, results):
                 if isinstance(vector, Exception) or vector is None:
                     _log.warning(f"Failed to warm embedding {key}: {vector}")
@@ -57,10 +57,13 @@ class WarmupLoader:
                     if self._gpu is not None:
                         self._gpu.put_embedding(key, vector)
                     if self._faiss is not None:
-                        await self._faiss.add(key, vector)
+                        batch_pairs.append((key, vector))
                     success_count += 1
                 except Exception as e:
                     _log.error(f"Error backfilling {key} during warm: {e}")
+
+            if self._faiss is not None and batch_pairs:
+                await self._faiss.add_bulk(batch_pairs)
 
         _log.info(f"Warmed {success_count} embeddings from GCS")
         return success_count
@@ -77,9 +80,7 @@ class WarmupLoader:
 
         for i in range(0, len(target_keys), KV_WARM_BATCH):
             batch = target_keys[i : i + KV_WARM_BATCH]
-            results = await asyncio.gather(
-                *(self._gcs.get_kv(k) for k in batch), return_exceptions=True
-            )
+            results = await asyncio.gather(*(self._gcs.get_kv(k) for k in batch), return_exceptions=True)
 
             for key, state in zip(batch, results):
                 if isinstance(state, Exception) or state is None:

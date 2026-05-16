@@ -1,16 +1,22 @@
-import asyncio
-import time
 import argparse
+import asyncio
 import json
+import time
+
 import numpy as np
 
-from embcache import (
-    EmbeddingCache, CacheConfig, FAISSIndexConfig, MetricsCollector,
+from embcache import CacheConfig, EmbeddingCache, FAISSIndexConfig, MetricsCollector
+from ._utils import (
+    append_to_md,
+    ensure_benchmark_md_sections,
+    make_test_fingerprint,
+    percentile,
+    random_vector,
 )
-from ._utils import percentile, append_to_md, make_test_fingerprint, random_vector
 
 try:
     import torch
+
     HAS_CUDA = torch.cuda.is_available()
 except ImportError:
     HAS_CUDA = False
@@ -20,10 +26,8 @@ async def run_scenario(name, config, n_vectors, dim, n_bench, n_warmup=50):
     metrics = MetricsCollector(namespace=name)
     cache = EmbeddingCache(config, metrics)
 
-    print(f"[{name}] Prefilling {n_vectors} vectors...")
-    # Prefill using the same key derivation get_or_fetch uses, by priming
-    # exact/cpu/faiss directly under deterministic query strings.
     from embcache._keys import make_embedding_cache_key
+
     query_strings = [f"query_{i}" for i in range(n_vectors)]
     prefilled_vecs = [random_vector(dim) for _ in range(n_vectors)]
     for q, vec in zip(query_strings, prefilled_vecs):
@@ -32,15 +36,13 @@ async def run_scenario(name, config, n_vectors, dim, n_bench, n_warmup=50):
         cache._cpu.put_embedding(key, vec)
         await cache._faiss.add(key, vec)
 
-    async def dummy_fetch(text: str):
+    async def dummy_fetch(_text: str):
         return random_vector(dim).tolist()
 
-    print(f"[{name}] Warming up...")
     for _ in range(n_warmup):
         idx = int(np.random.randint(n_vectors))
         await cache.get_or_fetch(query_strings[idx], fetch_fn=dummy_fetch)
 
-    print(f"[{name}] Starting benchmark...")
     latencies = []
     start_total = time.perf_counter()
     correct = 0
@@ -51,14 +53,11 @@ async def run_scenario(name, config, n_vectors, dim, n_bench, n_warmup=50):
 
         start = time.perf_counter()
         res = await cache.get_or_fetch(q_text, fetch_fn=dummy_fetch)
-        elapsed = (time.perf_counter() - start) * 1000
-        latencies.append(elapsed)
-
+        latencies.append((time.perf_counter() - start) * 1000)
         if name.endswith("_hnsw") and res.hit:
             correct += 1
 
     total_time = time.perf_counter() - start_total
-
     await cache.close()
 
     return {
@@ -130,6 +129,7 @@ async def main():
             f"{r['throughput_qps']:.1f} | {recall} |\n"
         )
 
+    ensure_benchmark_md_sections(args.output_md)
     append_to_md(args.output_md, "## Embedding Search Performance", md_content)
 
 

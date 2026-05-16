@@ -5,10 +5,37 @@ from pathlib import Path
 from typing import Any
 from embcache import EmbeddingFingerprint, KVFingerprint
 
+BENCHMARK_MD_SECTIONS = [
+    "## Embedding Search Performance",
+    "## KV Cache Performance",
+    "## GPU Slab Performance",
+    "## Hit Rate Validation",
+    "## GDS Gate",
+    "## Calibration Recommendations",
+]
+
 def percentile(data: list[float], p: float) -> float:
     if not data:
         return 0.0
     return float(np.percentile(data, p))
+
+def ensure_benchmark_md_sections(path: str = "BENCHMARK_RESULTS.md") -> None:
+    p = Path(path)
+    if not p.exists():
+        content = ["# Benchmark Results", ""]
+        for section in BENCHMARK_MD_SECTIONS:
+            content.extend([section, ""])
+        p.write_text("\n".join(content).rstrip() + "\n", encoding="utf-8")
+        return
+
+    existing = p.read_text(encoding="utf-8")
+    additions = [s for s in BENCHMARK_MD_SECTIONS if s not in existing]
+    if not additions:
+        return
+
+    with p.open("a", encoding="utf-8") as f:
+        for section in additions:
+            f.write(f"\n{section}\n")
 
 def append_to_md(path: str, section: str, content: str) -> None:
     p = Path(path)

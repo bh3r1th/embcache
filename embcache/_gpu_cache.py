@@ -1,5 +1,6 @@
 import collections
-from typing import Literal, Any, Dict
+from typing import Dict
+
 import numpy as np
 
 try:
@@ -10,6 +11,7 @@ except ImportError:
 from ._metrics import MetricsCollector, get_logger
 
 _log = get_logger(__name__)
+
 
 class GPUCache:
     def __init__(
@@ -29,12 +31,10 @@ class GPUCache:
         self.embedding_dim = embedding_dim
         self.kv_slot_size = kv_slot_size
 
-        # 1. Slab sizing
         props = torch.cuda.get_device_properties(0)
         self.slab_bytes = int(gpu_cache_max_fraction * props.total_memory)
 
-        # 2. Slot sizing
-        self.embedding_slot_size = embedding_dim * 4  # float32
+        self.embedding_slot_size = embedding_dim * 4  # float32 bytes
 
         emb_pool_bytes = int(self.slab_bytes * embedding_fraction)
         kv_pool_bytes = self.slab_bytes - emb_pool_bytes
@@ -45,25 +45,19 @@ class GPUCache:
         if self.n_embedding_slots == 0 and self.n_kv_slots == 0:
             raise ValueError(
                 f"Slab too small for any pool: emb_slots=0, kv_slots=0, "
-                f"slab_mb={self.slab_bytes/1024**2:.1f}"
+                f"slab_mb={self.slab_bytes / 1024**2:.1f}"
             )
 
-        # 3. Allocate slab
         self.slab = torch.empty(self.slab_bytes, dtype=torch.uint8, device="cuda:0")
         self._stream = torch.cuda.Stream(device="cuda:0")
 
-        # 4. Pool offsets
         self.embedding_offset = 0
         self.kv_offset = self.n_embedding_slots * self.embedding_slot_size
 
-        # 5. Slot bookkeeping
         self.free_embedding_slots = list(range(self.n_embedding_slots))
         self.free_kv_slots = list(range(self.n_kv_slots))
 
-        # Shared LRU: key -> (pool_type, slot_index)
         self.lru: "collections.OrderedDict[str, tuple[str, int]]" = collections.OrderedDict()
-
-        # Per-slot KV byte length (so reads don't return slot padding)
         self._kv_slot_len: Dict[int, int] = {}
 
         _log.info(
@@ -75,8 +69,7 @@ class GPUCache:
         if isinstance(vector, list):
             return torch.tensor(vector, dtype=torch.float32, device="cuda:0")
         if isinstance(vector, np.ndarray):
-            return torch.from_numpy(np.ascontiguousarray(vector, dtype=np.float32)).to("cuda:0", non_blocking=True)
-        # torch.Tensor
+            return torch.from_numpy(np.array(vector, dtype=np.float32)).to("cuda:0", non_blocking=True)
         return vector.to(device="cuda:0", dtype=torch.float32, non_blocking=True)
 
     def get_embedding(self, key: str):
@@ -85,10 +78,9 @@ class GPUCache:
                 return None
             if key in self.lru and self.lru[key][0] == "embedding":
                 _, slot_idx = self.lru.pop(key)
-                self.lru[key] = ("embedding", slot_idx)  # MRU
+                self.lru[key] = ("embedding", slot_idx)
 
                 offset = self.embedding_offset + (slot_idx * self.embedding_slot_size)
-
                 with torch.cuda.stream(self._stream):
                     data = self.slab[offset : offset + self.embedding_slot_size].view(torch.float32)
                     result = data.cpu()
@@ -176,7 +168,7 @@ class GPUCache:
             offset = self.kv_offset + (slot_idx * self.kv_slot_size)
 
             buf = np.frombuffer(state, dtype=np.uint8)
-            src_t = torch.from_numpy(buf).to("cuda:0", non_blocking=True)
+            src_t = torch.from_numpy(np.array(buf, dtype=np.uint8)).to("cuda:0", non_blocking=True)
 
             with torch.cuda.stream(self._stream):
                 self.slab[offset : offset + len(state)].copy_(src_t)
@@ -201,9 +193,9 @@ class GPUCache:
 
     def _evict_from_pool(self, pool_type: str) -> bool:
         target_key = None
-        for k, (v_pool, _) in self.lru.items():
-            if v_pool == pool_type:
-                target_key = k
+        for key, (entry_pool, _) in self.lru.items():
+            if entry_pool == pool_type:
+                target_key = key
                 break
 
         if target_key is None:
