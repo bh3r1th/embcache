@@ -6,16 +6,18 @@ import sys
 import time
 
 import numpy as np
+import torch
 
-from embcache._config import detect_hardware
 from embcache._cpu_cache import CPUCache
 from embcache._gpu_cache import GPUCache
 from embcache._metrics import MetricsCollector
 from benchmarks._utils import append_to_md, ensure_benchmark_md_sections, random_vector
 
-if detect_hardware() != "gpu_a100":
-    print("SKIP: bench_gpu_cache requires gpu_a100")
+if not torch.cuda.is_available() or "A100" not in torch.cuda.get_device_name(0):
+    print(f"SKIP: bench_gpu_cache requires A100, got: "
+          f"{torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no GPU'}")
     sys.exit(0)
+print(f"A100 confirmed: {torch.cuda.get_device_name(0)}")
 
 N_WARMUP = 50
 N_BENCH = 1000
